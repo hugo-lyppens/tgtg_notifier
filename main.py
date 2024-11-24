@@ -1,17 +1,23 @@
 #  -*- coding: utf-8 -*-
 
 import os
+import argparse
 import logging
 from datetime import datetime, timedelta
 
 import pytz
 import sentry_sdk
 from dotenv import load_dotenv
+
+import tgtg
 from tgtg import TgtgClient
 
 from db import DbWrapper
 from notifier import Notifier
 
+parser= argparse.ArgumentParser()
+parser.add_argument("-l","--login", help="Re-login given e-mail address even if tgtg token present in database", action='append')
+args = parser.parse_args()
 
 load_dotenv()
 
@@ -27,50 +33,76 @@ if os.environ.get("SENTRY_SDK_URL"):
 # Init and open database
 db = DbWrapper()
 users = db.get_users()
+force_login_user_emails = set(args.login or [])
 
 local_tz = pytz.timezone("America/New_York")
 now = datetime.now(local_tz)
 
 for user in users:
-    if not user["access_token"]:
+    user_id = user["user_id"]
+    user_email = user["email"]
+    user_access_token = user["access_token"]
+    # Init user notifier
+    notifier = Notifier(user)
+
+    if user_email in force_login_user_emails or not user_access_token:
         # login with too good to go token
-        logging.info("User {} new login".format(user["email"]))
-        tgtg_client = TgtgClient(email=user["email"])
+        logging.info("User {} new login".format(user_email))
+        tgtg_client = TgtgClient(email=user_email)
 
         credentials = tgtg_client.get_credentials()
+        user_id=credentials["user_id"]
+        user_access_token = credentials["access_token"]
         db.update_user(
-            user["email"],
-            credentials["user_id"],
-            credentials["access_token"],
+            user_email,
+            user_id,
+            user_access_token,
             credentials["refresh_token"],
             credentials["cookie"],
         )
 
     else:
+        if user_access_token == "INVALID":
+            logging.info("User {} new login needed using --login".format(user_email))
+            continue
+
         tgtg_client = TgtgClient(
-            access_token=user["access_token"],
+            access_token=user_access_token,
             refresh_token=user["refresh_token"],
             user_id=user["user_id"],
             cookie=user["cookie"],
         )
 
-    logging.info("User {}".format(user["email"]))
-
-    # Init user notifier
-    notifier = Notifier(user)
-#    notifier.send_notification('test')
+    logging.info("User {}".format(user_email))
 
     # You can then get items (as default it will get your favorites)
-    stores = tgtg_client.get_items()
+    try:
+        stores = tgtg_client.get_items()
+    except tgtg.exceptions.TgtgAPIError as e:
+        logging.error( "tgtg_client.get_items for user {} access {} refresh {} cookie {} resulted in Tgtg API error: {}".format( 
+            user_email,
+            tgtg_client.access_token,
+            tgtg_client.refresh_token,
+            tgtg_client.cookie,
+            e))
+        error_message = e.args[1].decode('utf-8')
+        if "UNAUTHORIZED" in error_message.upper():
+            text="clearing credentials for user {}".format(user_email)
+            logging.info(text)
+            notifier.send_notification(text)
+            db.update_user(
+               user_email,
+               user_id,
+               "INVALID","INVALID","INVALID")
+        raise
 
-    # Get user favorite stores
-    user_id = user["user_id"]
+    notifier = Notifier(user)
     favorite_stores = db.user_favorite_stores(user_id)
 
     for store in stores:
         s = store["store"]
         store_name=s["store_name"]
-        store_branch=s["branch"]
+        store_branch=s.get("branch") or ""
         store_id = int(s["store_id"])
         item = store["item"]
         item_id = int(item["item_id"])
