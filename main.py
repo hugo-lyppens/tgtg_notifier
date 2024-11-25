@@ -51,7 +51,10 @@ for user in users:
         tgtg_client = TgtgClient(email=user_email)
 
         credentials = tgtg_client.get_credentials()
-        user_id=credentials["user_id"]
+        print('credentials', credentials)
+
+        if not user_id:
+            user_id=hash(user_email)
         user_access_token = credentials["access_token"]
         db.update_user(
             user_email,
@@ -69,7 +72,7 @@ for user in users:
         tgtg_client = TgtgClient(
             access_token=user_access_token,
             refresh_token=user["refresh_token"],
-            user_id=user["user_id"],
+#            user_id=user["user_id"],
             cookie=user["cookie"],
         )
 
@@ -183,5 +186,5 @@ for user in users:
             user_id,
             store_id,
             item_id,
-            items_available,
-        )
+            items_available )
+
